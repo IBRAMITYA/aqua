@@ -1,0 +1,392 @@
+name: Aqua Smart Contract Security Audit
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, 'release/**']
+  push:
+    branches: [main, 'release/**']
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: aqua-security-audit-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+env:
+  CI: 'true'
+
+jobs:
+  hardhat-build-and-tests:
+    name: Hardhat - Build, tests, lint and snapshot checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+          cache: yarn
+
+      - name: Activate the repository Yarn version
+        run: |
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate
+          yarn --version
+
+      - name: Install locked dependencies
+        run: yarn install --frozen-lockfile --non-interactive
+
+      - name: Compile production contracts
+        run: yarn build
+
+      - name: Run Solidity tests
+        run: yarn test
+
+      - name: Run repository Solidity lint
+        run: yarn lint
+
+      - name: Verify gas snapshots
+        run: yarn snapshot:check
+
+  slither:
+    name: Slither - Solidity static analysis
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+          cache: yarn
+
+      - name: Install project dependencies
+        run: |
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate
+          yarn install --frozen-lockfile --non-interactive
+
+      - name: Build Hardhat project
+        run: yarn build
+
+      - name: Install pinned Slither
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/slither-venv"
+          "${RUNNER_TEMP}/slither-venv/bin/pip" install --disable-pip-version-check "slither-analyzer==0.11.6"
+
+      - name: Run Slither detectors and export SARIF
+        run: |
+          mkdir -p reports
+          "${RUNNER_TEMP}/slither-venv/bin/slither" . \
+            --sarif reports/slither.sarif \
+            --exclude-dependencies \
+            --fail-high
+
+      - name: Upload Slither findings to GitHub Code Scanning
+        if: always() && hashFiles('reports/slither.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370
+        with:
+          sarif_file: reports/slither.sarif
+          category: aqua-slither
+
+      - name: Archive Slither report
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        with:
+          name: aqua-slither-sarif
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  aderyn:
+    name: Aderyn - Solidity security analysis
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+          cache: yarn
+
+      - name: Install project dependencies
+        run: |
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate
+          yarn install --frozen-lockfile --non-interactive
+
+      - name: Install checksum-verified Aderyn v0.6.8
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/aderyn" "$HOME/.local/bin" reports
+          curl --fail --location --silent --show-error \
+            "https://github.com/Cyfrin/aderyn/releases/download/aderyn-v0.6.8/aderyn-x86_64-unknown-linux-gnu.tar.xz" \
+            --output "${RUNNER_TEMP}/aderyn.tar.xz"
+          echo "ffd6ca658962e211a3ac821c646f69c8e14bf1b1001cbfe091bcd4535a691e46  ${RUNNER_TEMP}/aderyn.tar.xz" | sha256sum --check -
+          tar -xJf "${RUNNER_TEMP}/aderyn.tar.xz" -C "${RUNNER_TEMP}/aderyn"
+          ADERYN_BIN="$(find "${RUNNER_TEMP}/aderyn" -type f -name aderyn -print -quit)"
+          test -n "$ADERYN_BIN"
+          install -m 0755 "$ADERYN_BIN" "$HOME/.local/bin/aderyn"
+          "$HOME/.local/bin/aderyn" --version
+
+      - name: Analyze protocol contracts and export SARIF
+        run: |
+          mkdir -p reports
+          "$HOME/.local/bin/aderyn" \
+            --src contracts/ \
+            --skip-update-check \
+            --output reports/aderyn.sarif
+
+      - name: Upload Aderyn findings to GitHub Code Scanning
+        if: always() && hashFiles('reports/aderyn.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370
+        with:
+          sarif_file: reports/aderyn.sarif
+          category: aqua-aderyn
+
+      - name: Archive Aderyn report
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        with:
+          name: aqua-aderyn-report
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  semgrep-smart-contract-rules:
+    name: Semgrep - DeFi and Solidity exploit patterns
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Checkout pinned open-source smart-contract rules
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: Decurity/semgrep-smart-contracts
+          ref: 2e878a89ac7bba1f8435e8a68e3ecb7700096cd5
+          path: security-rules
+          persist-credentials: false
+
+      - name: Run Semgrep security and performance rules
+        run: |
+          mkdir -p reports
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src" \
+            -w /src \
+            semgrep/semgrep:1.183.0 \
+            semgrep scan \
+              --config security-rules/solidity/security \
+              --config security-rules/solidity/performance \
+              --no-git-ignore \
+              --exclude 'node_modules/**' \
+              --exclude 'artifacts/**' \
+              --exclude 'cache/**' \
+              --metrics=off \
+              --strict \
+              --error \
+              --sarif \
+              --output reports/semgrep.sarif \
+              contracts examples test script
+
+      - name: Upload Semgrep findings to GitHub Code Scanning
+        if: always() && hashFiles('reports/semgrep.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370
+        with:
+          sarif_file: reports/semgrep.sarif
+          category: aqua-semgrep-defi
+
+      - name: Archive Semgrep report
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        with:
+          name: aqua-semgrep-sarif
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  solhint:
+    name: Solhint - Solidity rules and SARIF lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Run pinned Solhint using repository configuration
+        run: |
+          mkdir -p reports
+          npx --yes solhint@6.2.5 \
+            --formatter sarif \
+            --disc \
+            --noPoster \
+            "contracts/**/*.sol" \
+            "examples/**/*.sol" \
+            "test/**/*.sol" \
+            "script/**/*.sol" \
+            > reports/solhint.sarif
+
+      - name: Upload Solhint findings to GitHub Code Scanning
+        if: always() && hashFiles('reports/solhint.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370
+        with:
+          sarif_file: reports/solhint.sarif
+          category: aqua-solhint
+
+      - name: Archive Solhint report
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        with:
+          name: aqua-solhint-sarif
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  osv-scanner:
+    name: OSV-Scanner - Vulnerable dependency versions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Scan manifests and lockfiles recursively
+        run: |
+          mkdir -p reports
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src" \
+            ghcr.io/google/osv-scanner:v2.7.0 \
+            scan source --recursive --format sarif /src \
+            > "$GITHUB_WORKSPACE/reports/osv-scanner.sarif"
+
+      - name: Upload OSV findings to GitHub Code Scanning
+        if: always() && hashFiles('reports/osv-scanner.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370
+        with:
+          sarif_file: reports/osv-scanner.sarif
+          category: aqua-osv-scanner
+
+      - name: Archive OSV report
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        with:
+          name: aqua-osv-report
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  trivy:
+    name: Trivy - Dependencies, secrets and configuration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Scan repository filesystem
+        run: |
+          mkdir -p reports
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            aquasec/trivy:0.76.1 \
+            fs --scanners vuln,misconfig,secret \
+              --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+              --exit-code 1 \
+              --format sarif \
+              --output reports/trivy.sarif \
+              .
+
+      - name: Upload Trivy findings to GitHub Code Scanning
+        if: always() && hashFiles('reports/trivy.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370
+        with:
+          sarif_file: reports/trivy.sarif
+          category: aqua-trivy
+
+      - name: Archive Trivy report
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        with:
+          name: aqua-trivy-sarif
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  gitleaks:
+    name: Gitleaks - Entire Git history
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout complete Git history
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan all commits for exposed secrets
+        run: |
+          mkdir -p reports
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/repo" \
+            zricethezav/gitleaks:v8.30.1 \
+            git --redact \
+              --report-format sarif \
+              --report-path /repo/reports/gitleaks.sarif \
+              /repo
+
+      - name: Upload Gitleaks findings to GitHub Code Scanning
+        if: always() && hashFiles('reports/gitleaks.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370
+        with:
+          sarif_file: reports/gitleaks.sarif
+          category: aqua-gitleaks
+
+      - name: Archive Gitleaks report
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        with:
+          name: aqua-gitleaks-sarif
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 14
