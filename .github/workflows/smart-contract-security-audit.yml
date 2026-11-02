@@ -149,7 +149,7 @@ jobs:
           install -m 0755 "$ADERYN_BIN" "$HOME/.local/bin/aderyn"
           "$HOME/.local/bin/aderyn" --version
 
-      - name: Analyze protocol contracts and export SARIF
+      - name: Analyze protocol contracts and export JSON
         run: |
           mkdir -p reports
           "$HOME/.local/bin/aderyn" \
