@@ -155,23 +155,15 @@ jobs:
           "$HOME/.local/bin/aderyn" \
             --src contracts/ \
             --skip-update-check \
-            --output reports/aderyn.sarif
+            --output reports/aderyn.json
 
-      - name: Upload Aderyn findings to GitHub Code Scanning
-        if: always() && hashFiles('reports/aderyn.sarif') != ''
-        continue-on-error: true
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370
-        with:
-          sarif_file: reports/aderyn.sarif
-          category: aqua-aderyn
-
-      - name: Archive Aderyn report
+      - name: Archive Aderyn JSON report
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
         with:
           name: aqua-aderyn-report
-          path: reports/
-          if-no-files-found: ignore
+          path: reports/aderyn.json
+          if-no-files-found: error
           retention-days: 14
 
   semgrep-smart-contract-rules:
